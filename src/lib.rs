@@ -24,7 +24,7 @@ impl AuthContract {
     }
 
     pub fn is_authorized(
-        &self,
+        &mut self,
         account_id: AccountId,
         public_key: PublicKey,
         signatures: Option<Vec<Vec<u8>>>,
@@ -58,6 +58,20 @@ impl AuthContract {
         public_key: PublicKey,
     ) -> Result<(), AuthError> {
         self.state.remove_key(&env::predecessor_account_id(), &account_id, public_key)
+    }
+
+    #[handle_result]
+    pub fn remove_expired_keys(&mut self, account_id: AccountId) -> Result<(), AuthError> {
+        self.state.remove_expired_keys(&account_id)
+    }
+
+    #[handle_result]
+    pub fn remove_inactive_accounts(&mut self, account_id: AccountId) -> Result<(), AuthError> {
+        self.state.remove_inactive_accounts(account_id)
+    }
+
+    pub fn get_inactive_accounts(&self, limit: u32) -> Vec<AccountId> {
+        self.state.get_inactive_accounts(limit)
     }
 
     pub fn get_key_info(&self, account_id: AccountId, public_key: PublicKey) -> Option<KeyInfo> {
