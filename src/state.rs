@@ -1,5 +1,5 @@
 use near_sdk::{env, AccountId, PublicKey, BorshStorageKey};
-use near_sdk::store::{LookupMap, IterableSet, Vector};
+use near_sdk::store::{LookupMap, IterableSet};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use crate::types::KeyInfo;
 use crate::errors::AuthError;
@@ -20,7 +20,7 @@ enum StorageKey {
 pub struct AuthContractState {
     pub keys: LookupMap<AccountId, IterableSet<KeyInfo>>,
     pub last_active_timestamps: LookupMap<AccountId, u64>,
-    pub registered_accounts: Vector<AccountId>,
+    pub registered_accounts: IterableSet<AccountId>,
 }
 
 impl AuthContractState {
@@ -28,7 +28,7 @@ impl AuthContractState {
         Self {
             keys: LookupMap::new(StorageKey::Keys),
             last_active_timestamps: LookupMap::new(StorageKey::LastActive),
-            registered_accounts: Vector::new(StorageKey::Accounts),
+            registered_accounts: IterableSet::new(StorageKey::Accounts),
         }
     }
 
@@ -97,7 +97,7 @@ impl AuthContractState {
             self.keys.insert(account_id.clone(), IterableSet::new(StorageKey::KeySet {
                 account_id: account_id.clone(),
             }));
-            self.registered_accounts.push(account_id.clone());
+            self.registered_accounts.insert(account_id.clone());
         }
 
         let key_set = self.keys.get_mut(account_id).expect("Key set should exist");
@@ -140,9 +140,7 @@ impl AuthContractState {
         if key_set.is_empty() {
             self.keys.remove(account_id);
             self.last_active_timestamps.remove(account_id);
-            if let Some(index) = self.registered_accounts.iter().position(|id| id == account_id) {
-                self.registered_accounts.swap_remove(index as u32);
-            }
+            self.registered_accounts.remove(account_id);
         }
 
         AuthEvent::KeyRemoved {
@@ -225,9 +223,7 @@ impl AuthContractState {
         if key_set.is_empty() {
             self.keys.remove(account_id);
             self.last_active_timestamps.remove(account_id);
-            if let Some(index) = self.registered_accounts.iter().position(|id| id == account_id) {
-                self.registered_accounts.swap_remove(index as u32);
-            }
+            self.registered_accounts.remove(account_id);
         }
 
         Ok(())
@@ -254,9 +250,7 @@ impl AuthContractState {
 
         self.keys.remove(&account_id);
         self.last_active_timestamps.remove(&account_id);
-        if let Some(index) = self.registered_accounts.iter().position(|id| id == &account_id) {
-            self.registered_accounts.swap_remove(index as u32);
-        }
+        self.registered_accounts.remove(&account_id);
 
         Ok(())
     }
@@ -269,11 +263,20 @@ impl AuthContractState {
         let start = offset as usize;
         let end = (offset + limit) as usize;
 
-        for account_id in self.registered_accounts.iter().skip(start).take(end - start) {
-            if let Some(timestamp) = self.last_active_timestamps.get(account_id) {
-                if current_timestamp > timestamp + ONE_YEAR_MS {
-                    inactive_accounts.push(account_id.clone());
+        let mut count = 0;
+        let mut index = 0;
+        for account_id in self.registered_accounts.iter() {
+            if index >= start && count < limit {
+                if let Some(timestamp) = self.last_active_timestamps.get(account_id) {
+                    if current_timestamp > timestamp + ONE_YEAR_MS {
+                        inactive_accounts.push(account_id.clone());
+                        count += 1;
+                    }
                 }
+            }
+            index += 1;
+            if index >= end {
+                break;
             }
         }
         inactive_accounts
