@@ -1,0 +1,22 @@
+[package]
+name = "auth-onsocial"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = "5.12.0"
+serde = { version = "1.0", features = ["derive"] }
+borsh = "1.5.7"
+near-sdk-macros = "5.12.0"
+schemars = "0.8.22"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
