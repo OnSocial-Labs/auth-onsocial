@@ -1,5 +1,5 @@
 use near_sdk::{env, AccountId, PublicKey, BorshStorageKey};
-use near_sdk::store::{LookupMap, Vector};
+use near_sdk::store::{LookupMap, IterableSet, Vector};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use crate::types::KeyInfo;
 use crate::errors::AuthError;
@@ -9,16 +9,16 @@ use crate::events::AuthEvent;
 #[borsh(crate = "near_sdk::borsh")]
 enum StorageKey {
     Keys,
-    KeyList { account_id: AccountId },
-    LastActiveTimestamps,
-    RegisteredAccounts,
+    KeySet { account_id: AccountId },
+    LastActive,
+    Accounts,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, near_sdk_macros::NearSchema)]
 #[borsh(crate = "near_sdk::borsh")]
 #[abi(borsh)]
 pub struct AuthContractState {
-    pub keys: LookupMap<AccountId, Vector<KeyInfo>>,
+    pub keys: LookupMap<AccountId, IterableSet<KeyInfo>>,
     pub last_active_timestamps: LookupMap<AccountId, u64>,
     pub registered_accounts: Vector<AccountId>,
 }
@@ -27,8 +27,8 @@ impl AuthContractState {
     pub fn new() -> Self {
         Self {
             keys: LookupMap::new(StorageKey::Keys),
-            last_active_timestamps: LookupMap::new(StorageKey::LastActiveTimestamps),
-            registered_accounts: Vector::new(StorageKey::RegisteredAccounts),
+            last_active_timestamps: LookupMap::new(StorageKey::LastActive),
+            registered_accounts: Vector::new(StorageKey::Accounts),
         }
     }
 
@@ -38,12 +38,12 @@ impl AuthContractState {
         public_key: &PublicKey,
         signatures: Option<Vec<Vec<u8>>>,
     ) -> bool {
-        let key_list = match self.keys.get(account_id) {
-            Some(list) => list,
+        let key_set = match self.keys.get(account_id) {
+            Some(set) => set,
             None => return false,
         };
 
-        let key_info = match key_list.iter().find(|k| k.public_key == *public_key) {
+        let key_info = match key_set.iter().find(|k| k.public_key == *public_key) {
             Some(info) => info,
             None => return false,
         };
@@ -94,17 +94,17 @@ impl AuthContractState {
         };
 
         if self.keys.get(account_id).is_none() {
-            self.keys.insert(account_id.clone(), Vector::new(StorageKey::KeyList {
+            self.keys.insert(account_id.clone(), IterableSet::new(StorageKey::KeySet {
                 account_id: account_id.clone(),
             }));
             self.registered_accounts.push(account_id.clone());
         }
 
-        let key_list = self.keys.get_mut(account_id).expect("Key list should exist");
-        if key_list.iter().any(|k| k.public_key == public_key) {
+        let key_set = self.keys.get_mut(account_id).expect("Key set should exist");
+        if key_set.contains(&key_info) {
             return Err(AuthError::KeyAlreadyExists);
         }
-        key_list.push(key_info);
+        key_set.insert(key_info);
 
         self.last_active_timestamps.insert(account_id.clone(), env::block_timestamp_ms());
 
@@ -126,13 +126,18 @@ impl AuthContractState {
             return Err(AuthError::Unauthorized);
         }
 
-        let key_list = self.keys.get_mut(account_id).ok_or(AuthError::KeyNotFound)?;
-        let index = key_list
-            .iter()
-            .position(|k| k.public_key == public_key)
-            .ok_or(AuthError::KeyNotFound)?;
-        key_list.swap_remove(index as u32);
-        if key_list.is_empty() {
+        let key_set = self.keys.get_mut(account_id).ok_or(AuthError::KeyNotFound)?;
+        let key_info = KeyInfo {
+            public_key: public_key.clone(),
+            expiration_timestamp: None,
+            is_multi_sig: false,
+            multi_sig_threshold: None,
+        };
+        if !key_set.remove(&key_info) {
+            return Err(AuthError::KeyNotFound);
+        }
+
+        if key_set.is_empty() {
             self.keys.remove(account_id);
             self.last_active_timestamps.remove(account_id);
             if let Some(index) = self.registered_accounts.iter().position(|id| id == account_id) {
@@ -148,25 +153,76 @@ impl AuthContractState {
         Ok(())
     }
 
-    pub fn remove_expired_keys(&mut self, account_id: &AccountId) -> Result<(), AuthError> {
-        let key_list = self.keys.get_mut(account_id).ok_or(AuthError::KeyNotFound)?;
-        let current_timestamp = env::block_timestamp_ms();
-        let mut i = 0;
-        while i < key_list.len() {
-            if let Some(key_info) = key_list.get(i) {
-                if key_info.expiration_timestamp.map_or(false, |exp| current_timestamp > exp) {
-                    let public_key = key_list.swap_remove(i);
-                    AuthEvent::KeyRemoved {
-                        account_id: account_id.clone(),
-                        public_key: format!("{:?}", public_key.public_key),
-                    }.emit();
-                    continue;
-                }
-            }
-            i += 1;
+    pub fn rotate_key(
+        &mut self,
+        caller: &AccountId,
+        account_id: &AccountId,
+        old_public_key: PublicKey,
+        new_public_key: PublicKey,
+        expiration_days: Option<u32>,
+        is_multi_sig: bool,
+        multi_sig_threshold: Option<u32>,
+    ) -> Result<(), AuthError> {
+        if caller != account_id {
+            return Err(AuthError::Unauthorized);
         }
 
-        if key_list.is_empty() {
+        let key_set = self.keys.get_mut(account_id).ok_or(AuthError::KeyNotFound)?;
+        let old_key_info = KeyInfo {
+            public_key: old_public_key.clone(),
+            expiration_timestamp: None,
+            is_multi_sig: false,
+            multi_sig_threshold: None,
+        };
+        if !key_set.contains(&old_key_info) {
+            return Err(AuthError::KeyNotFound);
+        }
+
+        let new_key_info = KeyInfo {
+            public_key: new_public_key.clone(),
+            expiration_timestamp: expiration_days.map(|days| {
+                env::block_timestamp_ms() + (days as u64 * 24 * 60 * 60 * 1000)
+            }),
+            is_multi_sig,
+            multi_sig_threshold,
+        };
+        if key_set.contains(&new_key_info) {
+            return Err(AuthError::KeyAlreadyExists);
+        }
+
+        key_set.remove(&old_key_info);
+        key_set.insert(new_key_info);
+        self.last_active_timestamps.insert(account_id.clone(), env::block_timestamp_ms());
+
+        AuthEvent::KeyRotated {
+            account_id: account_id.clone(),
+            old_public_key: format!("{:?}", old_public_key),
+            new_public_key: format!("{:?}", new_public_key),
+        }.emit();
+
+        Ok(())
+    }
+
+    pub fn remove_expired_keys(&mut self, account_id: &AccountId) -> Result<(), AuthError> {
+        let key_set = self.keys.get_mut(account_id).ok_or(AuthError::KeyNotFound)?;
+        let current_timestamp = env::block_timestamp_ms();
+        let mut to_remove = Vec::new();
+
+        for key_info in key_set.iter() {
+            if key_info.expiration_timestamp.map_or(false, |exp| current_timestamp > exp) {
+                to_remove.push(key_info.clone());
+            }
+        }
+
+        for key_info in to_remove {
+            key_set.remove(&key_info);
+            AuthEvent::KeyRemoved {
+                account_id: account_id.clone(),
+                public_key: format!("{:?}", key_info.public_key),
+            }.emit();
+        }
+
+        if key_set.is_empty() {
             self.keys.remove(account_id);
             self.last_active_timestamps.remove(account_id);
             if let Some(index) = self.registered_accounts.iter().position(|id| id == account_id) {
@@ -186,12 +242,13 @@ impl AuthContractState {
             return Err(AuthError::AccountStillActive);
         }
 
-        let key_list = self.keys.get_mut(&account_id).ok_or(AuthError::KeyNotFound)?;
-        while !key_list.is_empty() {
-            let public_key = key_list.swap_remove(0);
+        let key_set = self.keys.get_mut(&account_id).ok_or(AuthError::KeyNotFound)?;
+        let to_remove: Vec<_> = key_set.iter().cloned().collect();
+        for key_info in to_remove {
+            key_set.remove(&key_info);
             AuthEvent::KeyRemoved {
                 account_id: account_id.clone(),
-                public_key: format!("{:?}", public_key.public_key),
+                public_key: format!("{:?}", key_info.public_key),
             }.emit();
         }
 
@@ -204,17 +261,18 @@ impl AuthContractState {
         Ok(())
     }
 
-    pub fn get_inactive_accounts(&self, limit: u32) -> Vec<AccountId> {
+    pub fn get_inactive_accounts(&self, limit: u32, offset: u32) -> Vec<AccountId> {
+        assert!(limit <= 100, "Limit exceeds maximum allowed value");
         let current_timestamp = env::block_timestamp_ms();
         const ONE_YEAR_MS: u64 = 31_536_000_000; // 1 year in milliseconds
         let mut inactive_accounts = Vec::new();
-        for account_id in self.registered_accounts.iter() {
+        let start = offset as usize;
+        let end = (offset + limit) as usize;
+
+        for account_id in self.registered_accounts.iter().skip(start).take(end - start) {
             if let Some(timestamp) = self.last_active_timestamps.get(account_id) {
                 if current_timestamp > timestamp + ONE_YEAR_MS {
                     inactive_accounts.push(account_id.clone());
-                    if inactive_accounts.len() >= limit as usize {
-                        break;
-                    }
                 }
             }
         }
@@ -224,6 +282,17 @@ impl AuthContractState {
     pub fn get_key_info(&self, account_id: &AccountId, public_key: &PublicKey) -> Option<KeyInfo> {
         self.keys
             .get(account_id)
-            .and_then(|list| list.iter().find(|k| k.public_key == *public_key).cloned())
+            .and_then(|set| set.iter().find(|k| k.public_key == *public_key).cloned())
+    }
+
+    pub fn get_keys(&self, account_id: &AccountId, limit: u32, offset: u32) -> Vec<KeyInfo> {
+        assert!(limit <= 100, "Limit exceeds maximum allowed value");
+        let key_set = match self.keys.get(account_id) {
+            Some(set) => set,
+            None => return Vec::new(),
+        };
+        let start = offset as usize;
+        let end = (offset + limit) as usize;
+        key_set.iter().skip(start).take(end - start).cloned().collect()
     }
 }

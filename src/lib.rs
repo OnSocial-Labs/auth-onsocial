@@ -61,6 +61,27 @@ impl AuthContract {
     }
 
     #[handle_result]
+    pub fn rotate_key(
+        &mut self,
+        account_id: AccountId,
+        old_public_key: PublicKey,
+        new_public_key: PublicKey,
+        expiration_days: Option<u32>,
+        is_multi_sig: bool,
+        multi_sig_threshold: Option<u32>,
+    ) -> Result<(), AuthError> {
+        self.state.rotate_key(
+            &env::predecessor_account_id(),
+            &account_id,
+            old_public_key,
+            new_public_key,
+            expiration_days,
+            is_multi_sig,
+            multi_sig_threshold,
+        )
+    }
+
+    #[handle_result]
     pub fn remove_expired_keys(&mut self, account_id: AccountId) -> Result<(), AuthError> {
         self.state.remove_expired_keys(&account_id)
     }
@@ -70,11 +91,15 @@ impl AuthContract {
         self.state.remove_inactive_accounts(account_id)
     }
 
-    pub fn get_inactive_accounts(&self, limit: u32) -> Vec<AccountId> {
-        self.state.get_inactive_accounts(limit)
+    pub fn get_inactive_accounts(&self, limit: u32, offset: u32) -> Vec<AccountId> {
+        self.state.get_inactive_accounts(limit, offset)
     }
 
     pub fn get_key_info(&self, account_id: AccountId, public_key: PublicKey) -> Option<KeyInfo> {
         self.state.get_key_info(&account_id, &public_key)
+    }
+
+    pub fn get_keys(&self, account_id: AccountId, limit: u32, offset: u32) -> Vec<KeyInfo> {
+        self.state.get_keys(&account_id, limit, offset)
     }
 }

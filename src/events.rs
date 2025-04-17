@@ -6,4 +6,6 @@ pub enum AuthEvent {
     KeyRegistered { account_id: AccountId, public_key: String },
     #[event_version("1.0.0")]
     KeyRemoved { account_id: AccountId, public_key: String },
+    #[event_version("1.0.0")]
+    KeyRotated { account_id: AccountId, old_public_key: String, new_public_key: String },
 }
